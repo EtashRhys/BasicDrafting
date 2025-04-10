@@ -1,0 +1,514 @@
+from kivy.app import App
+from kivy.uix.widget import Widget
+from kivy.uix.button import Button
+from kivy.uix.slider import Slider
+from kivy.uix.checkbox import CheckBox
+from kivy.uix.textinput import TextInput
+from kivy.uix.floatlayout import FloatLayout
+from kivy.uix.boxlayout import BoxLayout
+from kivy.uix.popup import Popup
+from kivy.uix.colorpicker import ColorPicker
+from kivy.uix.filechooser import FileChooserListView
+from kivy.graphics import Color, Line, Rectangle, Ellipse, Canvas
+from kivy.core.image import Image as CoreImage
+from kivy.lang import Builder
+import os
+
+# Embed the .kv layout in the Python file
+Builder.load_string("""
+<DrawingLayout>:
+    canvas:
+        Color:
+            rgba: 0.9, 0.9, 0.9, 1
+        Rectangle:
+            pos: self.pos
+            size: self.size
+
+    # Project name input
+    TextInput:
+        id: project_name
+        text: "Untitled"
+        size_hint: 0.3, 0.05
+        pos_hint: {"top": 1, "left": 0}
+        font_size: 16
+        multiline: False
+
+    # Toolbar toggle button
+    Button:
+        text: "Tools"
+        size_hint: 0.15, 0.05
+        pos_hint: {"top": 1, "right": 1}
+        font_size: 16
+        on_press: toolbar.opacity = 1 if toolbar.opacity == 0 else 0
+
+    # Drawing canvas
+    DrawingCanvas:
+        id: canvas
+        size_hint: 1, 0.95
+        pos_hint: {"top": 0.95, "left": 0}
+
+    # Toolbar
+    BoxLayout:
+        id: toolbar
+        orientation: "vertical"
+        size_hint: 0.15, 0.95
+        pos_hint: {"top": 0.95, "right": 1}
+        opacity: 0
+        spacing: 5
+        padding: 5
+
+        Button:
+            text: "Free"
+            font_size: 14
+            on_press: canvas.current_tool = "free"
+        Button:
+            text: "Line"
+            font_size: 14
+            on_press: canvas.current_tool = "line"
+        Button:
+            text: "Rect"
+            font_size: 14
+            on_press: canvas.current_tool = "rect"
+        Button:
+            text: "Square"
+            font_size: 14
+            on_press: canvas.current_tool = "square"
+        Button:
+            text: "Circle"
+            font_size: 14
+            on_press: canvas.current_tool = "circle"
+        Button:
+            text: "Eraser"
+            font_size: 14
+            on_press: canvas.current_tool = "eraser"
+        CheckBox:
+            id: fill
+            size_hint_y: None
+            height: 40
+            on_active: canvas.fill_color = canvas.current_color if self.active else None
+        Label:
+            text: "Fill"
+            font_size: 14
+            size_hint_y: None
+            height: 20
+        Slider:
+            id: thickness
+            min: 1
+            max: 20
+            value: 5
+            on_value: canvas.thickness = self.value
+        Label:
+            text: f"Thick: {int(thickness.value)}"
+            font_size: 14
+            size_hint_y: None
+            height: 20
+        Button:
+            text: "Pick Color"
+            font_size: 14
+            on_press: canvas.open_color_picker()
+        Button:
+            text: "Bg Color"
+            font_size: 14
+            on_press: canvas.open_bg_color_picker()
+        Button:
+            text: "Undo"
+            font_size: 14
+            on_press: canvas.undo()
+        Button:
+            text: "Show Grid"
+            font_size: 14
+            on_press: canvas.toggle_grid()
+        Button:
+            text: "Clear"
+            font_size: 14
+            on_press: canvas.clear()
+        Button:
+            text: "Save As"
+            font_size: 14
+            on_press: canvas.open_save_as_popup(project_name.text)
+        Button:
+            text: "Open"
+            font_size: 14
+            on_press: canvas.open_file_chooser()
+""")
+
+class DrawingCanvas(Widget):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.current_tool = "free"
+        self.current_color = [0, 0, 0, 1]  # RGBA: Black
+        self.fill_color = None
+        self.thickness = 5
+        self.bg_color = [1, 1, 1, 1]  # White background
+        self.start_pos = None
+        self.shapes = []  # List of shape objects
+        self.undo_stack = [[]]  # List of shape lists for undo
+        self.selected_shape = None  # Shape for recoloring
+        self.preview_canvas = Canvas()  # Temporary canvas for previews
+        self.grid_visible = False  # Grid visibility toggle
+        self.drawing = False  # Flag to track drawing vs. selecting
+        self.bind(size=self.update_canvas)
+        self.bind(pos=self.update_canvas)
+        with self.canvas:
+            Color(*self.bg_color)
+            self.bg_rect = Rectangle(pos=self.pos, size=self.size)
+
+    def update_canvas(self, *args):
+        self.bg_rect.pos = self.pos
+        self.bg_rect.size = self.size
+        if self.grid_visible:
+            self.draw_grid()
+
+    def open_color_picker(self):
+        content = BoxLayout(orientation="vertical", spacing=5, padding=5)
+        color_picker = ColorPicker(color=self.current_color)
+        done_button = Button(text="Done", size_hint=(1, 0.1))
+        content.add_widget(color_picker)
+        content.add_widget(done_button)
+        popup = Popup(title="Pick Color", content=content, size_hint=(0.9, 0.9))
+        done_button.bind(on_press=lambda instance: self.set_color(color_picker.color, popup))
+        popup.open()
+
+    def open_bg_color_picker(self):
+        content = BoxLayout(orientation="vertical", spacing=5, padding=5)
+        color_picker = ColorPicker(color=self.bg_color)
+        done_button = Button(text="Done", size_hint=(1, 0.1))
+        content.add_widget(color_picker)
+        content.add_widget(done_button)
+        popup = Popup(title="Pick Background Color", content=content, size_hint=(0.9, 0.9))
+        done_button.bind(on_press=lambda instance: self.set_bg_color(color_picker.color, popup))
+        popup.open()
+
+    def open_save_as_popup(self, default_name):
+        content = BoxLayout(orientation="vertical", spacing=5, padding=5)
+        filename_input = TextInput(text=default_name, multiline=False, size_hint=(1, 0.2))
+        save_button = Button(text="Save", size_hint=(1, 0.1))
+        cancel_button = Button(text="Cancel", size_hint=(1, 0.1))
+        content.add_widget(filename_input)
+        content.add_widget(save_button)
+        content.add_widget(cancel_button)
+        popup = Popup(title="Save As", content=content, size_hint=(0.8, 0.4))
+        save_button.bind(on_press=lambda instance: self.save(filename_input.text, popup))
+        cancel_button.bind(on_press=popup.dismiss)
+        popup.open()
+
+    def open_file_chooser(self):
+        content = BoxLayout(orientation="vertical", spacing=5, padding=5)
+        file_chooser = FileChooserListView(path="/sdcard/", filters=["*.png"])
+        open_button = Button(text="Open", size_hint=(1, 0.1))
+        cancel_button = Button(text="Cancel", size_hint=(1, 0.1))
+        content.add_widget(file_chooser)
+        content.add_widget(open_button)
+        content.add_widget(cancel_button)
+        popup = Popup(title="Open File", content=content, size_hint=(0.9, 0.9))
+        open_button.bind(on_press=lambda instance: self.load(file_chooser.selection[0] if file_chooser.selection else None, popup))
+        cancel_button.bind(on_press=popup.dismiss)
+        popup.open()
+
+    def set_color(self, color, popup):
+        self.current_color = color
+        if self.selected_shape:
+            self.recolor_shape(self.selected_shape, color, self.selected_shape["fill_color"])
+        self.fill_color = self.current_color if self.fill_color else None
+        popup.dismiss()
+
+    def set_bg_color(self, color, popup):
+        self.bg_color = color
+        with self.canvas:
+            Color(*self.bg_color)
+            self.bg_rect = Rectangle(pos=self.pos, size=self.size)
+            for shape in self.shapes:
+                for color, instruction in shape["instructions"]:
+                    self.canvas.add(color)
+                    self.canvas.add(instruction)
+        if self.grid_visible:
+            self.draw_grid()
+        popup.dismiss()
+
+    def recolor_shape(self, shape, outline_color, fill_color):
+        shape["color"] = outline_color
+        shape["fill_color"] = fill_color
+        new_instructions = []
+        with self.canvas:
+            self.canvas.remove_group(shape["group"])
+            if shape["type"] in ["line", "free", "eraser"]:
+                points = shape["points"]
+                line = Line(points=points, width=shape["thickness"], group=shape["group"])
+                new_instructions.append((Color(*outline_color), line))
+            elif shape["type"] in ["rect", "square"]:
+                pos, size = shape["pos"], shape["size"]
+                if fill_color:
+                    fill_rect = Rectangle(pos=pos, size=size, group=shape["group"])
+                    new_instructions.append((Color(*fill_color), fill_rect))
+                outline_rect = Rectangle(pos=pos, size=size, width=shape["thickness"], group=shape["group"])
+                new_instructions.append((Color(*outline_color), outline_rect))
+            elif shape["type"] == "circle":
+                center, radius = shape["center"], shape["radius"]
+                pos = (center[0] - radius, center[1] - radius)
+                size = (radius * 2, radius * 2)
+                if fill_color:
+                    fill_ellipse = Ellipse(pos=pos, size=size, group=shape["group"])
+                    new_instructions.append((Color(*fill_color), fill_ellipse))
+                outline_ellipse = Ellipse(pos=pos, size=size, width=shape["thickness"], group=shape["group"])
+                new_instructions.append((Color(*outline_color), outline_ellipse))
+            shape["instructions"] = new_instructions
+            for color, instruction in new_instructions:
+                self.canvas.add(color)
+                self.canvas.add(instruction)
+        if self.grid_visible:
+            self.draw_grid()
+
+    def save_state(self):
+        if len(self.undo_stack) >= 10:
+            self.undo_stack.pop(0)
+        self.undo_stack.append(self.shapes[:])
+
+    def select_shape(self, pos):
+        self.selected_shape = None
+        for shape in reversed(self.shapes):  # Check newer shapes first
+            if shape["type"] in ["rect", "square"]:
+                x, y = shape["pos"]
+                w, h = shape["size"]
+                if x <= pos[0] <= x + w and y <= pos[1] <= y + h:
+                    self.selected_shape = shape
+                    break
+            elif shape["type"] == "circle":
+                center, radius = shape["center"], shape["radius"]
+                dx, dy = pos[0] - center[0], pos[1] - center[1]
+                if (dx ** 2 + dy ** 2) <= radius ** 2:
+                    self.selected_shape = shape
+                    break
+            elif shape["type"] in ["line", "free", "eraser"]:
+                points = shape["points"]
+                for i in range(0, len(points) - 2, 2):
+                    x1, y1 = points[i], points[i + 1]
+                    x2, y2 = points[i + 2] if i + 2 < len(points) else points[i], points[i + 3] if i + 3 < len(points) else points[i + 1]
+                    if self.point_near_line(pos, (x1, y1), (x2, y2), shape["thickness"]):
+                        self.selected_shape = shape
+                        break
+        if self.selected_shape:
+            self.open_color_picker()
+
+    def point_near_line(self, pos, p1, p2, thickness):
+        x, y = pos
+        x1, y1 = p1
+        x2, y2 = p2
+        length = ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
+        if length == 0:
+            return ((x - x1) ** 2 + (y - y1) ** 2) ** 0.5 <= thickness
+        t = max(0, min(1, ((x - x1) * (x2 - x1) + (y - y1) * (y2 - y1)) / length ** 2))
+        projection = (x1 + t * (x2 - x1), y1 + t * (y2 - y1))
+        distance = ((x - projection[0]) ** 2 + (y - projection[1]) ** 2) ** 0.5
+        return distance <= thickness
+
+    def toggle_grid(self):
+        self.grid_visible = not self.grid_visible
+        self.canvas.after.clear()
+        if self.grid_visible:
+            self.draw_grid()
+
+    def draw_grid(self):
+        self.canvas.after.clear()
+        with self.canvas.after:
+            Color(0.5, 0.7, 1, 1)  # Light blue
+            grid_size = 20
+            for x in range(int(self.x), int(self.x + self.width), grid_size):
+                Line(points=[x, self.y, x, self.y + self.height], width=1)
+            for y in range(int(self.y), int(self.y + self.height), grid_size):
+                Line(points=[self.x, y, self.x + self.width, y], width=1)
+
+    def on_touch_down(self, touch):
+        if not self.collide_point(*touch.pos):
+            return
+        self.start_pos = touch.pos
+        self.drawing = True  # Start drawing mode
+        group = str(len(self.shapes))
+        shape = {"type": self.current_tool, "color": self.current_color[:], "fill_color": self.fill_color[:] if self.fill_color else None,
+                 "thickness": self.thickness, "instructions": [], "group": group}
+        with self.canvas:
+            if self.current_tool == "free":
+                Color(*self.current_color)
+                line = Line(points=[touch.pos[0], touch.pos[1]], width=self.thickness, group=group)
+                shape["instructions"].append((Color(*self.current_color), line))
+                touch.ud["line"] = line
+                self.shapes.append(shape)
+            elif self.current_tool == "eraser":
+                Color(*self.bg_color)
+                line = Line(points=[touch.pos[0], touch.pos[1]], width=self.thickness, group=group)
+                shape["instructions"].append((Color(*self.bg_color), line))
+                shape["color"] = self.bg_color[:]
+                touch.ud["line"] = line
+                self.shapes.append(shape)
+            else:
+                self.preview_shape(touch.pos)  # Only preview, no selection yet
+        return True
+
+    def on_touch_move(self, touch):
+        if not self.collide_point(*touch.pos) or self.start_pos is None:
+            return
+        if self.current_tool in ["free", "eraser"]:
+            with self.canvas:
+                Color(*(self.current_color if self.current_tool == "free" else self.bg_color))
+                touch.ud["line"].points += [touch.pos[0], touch.pos[1]]
+        else:
+            self.preview_shape(touch.pos)
+        return True
+
+    def on_touch_up(self, touch):
+        if not self.collide_point(*touch.pos) or self.start_pos is None:
+            return
+        self.preview_canvas.clear()
+        if self.drawing and self.current_tool not in ["free", "eraser"]:
+            group = str(len(self.shapes))
+            shape = {"type": self.current_tool, "color": self.current_color[:], "fill_color": self.fill_color[:] if self.fill_color else None,
+                     "thickness": self.thickness, "instructions": [], "group": group}
+            with self.canvas:
+                Color(*self.current_color)
+                if self.current_tool == "line":
+                    line = Line(points=[self.start_pos[0], self.start_pos[1], touch.pos[0], touch.pos[1]],
+                                width=self.thickness, group=group)
+                    shape["instructions"].append((Color(*self.current_color), line))
+                    shape["points"] = [self.start_pos[0], self.start_pos[1], touch.pos[0], touch.pos[1]]
+                elif self.current_tool == "rect":
+                    x, y = self.start_pos[0], self.start_pos[1]  # Top-left corner
+                    w = max(1, touch.pos[0] - self.start_pos[0])  # Extend right
+                    h = max(1, touch.pos[1] - self.start_pos[1])  # Extend down
+                    if self.fill_color:
+                        fill_rect = Rectangle(pos=(x, y), size=(w, h), group=group)
+                        shape["instructions"].append((Color(*self.fill_color), fill_rect))
+                    outline_rect = Rectangle(pos=(x, y), size=(w, h), width=self.thickness, group=group)
+                    shape["instructions"].append((Color(*self.current_color), outline_rect))
+                    shape["pos"] = (x, y)
+                    shape["size"] = (w, h)
+                elif self.current_tool == "square":
+                    x, y = self.start_pos[0], self.start_pos[1]  # Top-left corner
+                    size = max(1, max(touch.pos[0] - self.start_pos[0], touch.pos[1] - self.start_pos[1]))  # Extend right/down
+                    if self.fill_color:
+                        fill_rect = Rectangle(pos=(x, y), size=(size, size), group=group)
+                        shape["instructions"].append((Color(*self.fill_color), fill_rect))
+                    outline_rect = Rectangle(pos=(x, y), size=(size, size), width=self.thickness, group=group)
+                    shape["instructions"].append((Color(*self.current_color), outline_rect))
+                    shape["pos"] = (x, y)
+                    shape["size"] = (size, size)
+                elif self.current_tool == "circle":
+                    center = ((self.start_pos[0] + touch.pos[0]) / 2, (self.start_pos[1] + touch.pos[1]) / 2)
+                    radius = max(abs(touch.pos[0] - self.start_pos[0]), abs(touch.pos[1] - self.start_pos[1])) / 2
+                    pos = (center[0] - radius, center[1] - radius)
+                    size = (radius * 2, radius * 2)
+                    if self.fill_color:
+                        fill_ellipse = Ellipse(pos=pos, size=size, group=group)
+                        shape["instructions"].append((Color(*self.fill_color), fill_ellipse))
+                    outline_ellipse = Ellipse(pos=pos, size=size, width=self.thickness, group=group)
+                    shape["instructions"].append((Color(*self.current_color), outline_ellipse))
+                    shape["center"] = center
+                    shape["radius"] = radius
+                if shape["instructions"]:
+                    self.shapes.append(shape)
+            if self.grid_visible:
+                self.draw_grid()
+            self.save_state()
+        elif self.current_tool not in ["free", "eraser"]:
+            self.select_shape(touch.pos)  # Selection only if not drawing
+        self.start_pos = None
+        self.drawing = False
+        return True
+
+    def preview_shape(self, end_pos):
+        self.preview_canvas.clear()
+        with self.preview_canvas:
+            Color(*self.current_color)
+            if self.current_tool == "line":
+                Line(points=[self.start_pos[0], self.start_pos[1], end_pos[0], end_pos[1]], width=self.thickness)
+            elif self.current_tool == "rect":
+                x, y = self.start_pos[0], self.start_pos[1]  # Top-left corner
+                w = max(1, end_pos[0] - self.start_pos[0])  # Extend right
+                h = max(1, end_pos[1] - self.start_pos[1])  # Extend down
+                if self.fill_color:
+                    Color(*self.fill_color)
+                    Rectangle(pos=(x, y), size=(w, h))
+                Color(*self.current_color)
+                Rectangle(pos=(x, y), size=(w, h), width=self.thickness)
+            elif self.current_tool == "square":
+                x, y = self.start_pos[0], self.start_pos[1]  # Top-left corner
+                size = max(1, max(end_pos[0] - self.start_pos[0], end_pos[1] - self.start_pos[1]))  # Extend right/down
+                if self.fill_color:
+                    Color(*self.fill_color)
+                    Rectangle(pos=(x, y), size=(size, size))
+                Color(*self.current_color)
+                Rectangle(pos=(x, y), size=(size, size), width=self.thickness)
+            elif self.current_tool == "circle":
+                center = ((self.start_pos[0] + end_pos[0]) / 2, (self.start_pos[1] + end_pos[1]) / 2)
+                radius = max(abs(end_pos[0] - self.start_pos[0]), abs(end_pos[1] - self.start_pos[1])) / 2
+                pos = (center[0] - radius, center[1] - radius)
+                size = (radius * 2, radius * 2)
+                if self.fill_color:
+                    Color(*self.fill_color)
+                    Ellipse(pos=pos, size=size)
+                Color(*self.current_color)
+                Ellipse(pos=pos, size=size, width=self.thickness)
+
+    def clear(self):
+        self.canvas.clear()
+        self.canvas.after.clear()
+        self.preview_canvas.clear()
+        with self.canvas:
+            Color(*self.bg_color)
+            self.bg_rect = Rectangle(pos=self.pos, size=self.size)
+        self.shapes = []
+        self.undo_stack = [[]]
+        self.selected_shape = None
+        if self.grid_visible:
+            self.draw_grid()
+
+    def undo(self):
+        if len(self.undo_stack) > 1:
+            self.undo_stack.pop()
+            self.shapes = self.undo_stack[-1][:]
+            self.canvas.clear()
+            self.canvas.after.clear()
+            with self.canvas:
+                Color(*self.bg_color)
+                self.bg_rect = Rectangle(pos=self.pos, size=self.size)
+                for shape in self.shapes:
+                    for color, instruction in shape["instructions"]:
+                        self.canvas.add(color)
+                        self.canvas.add(instruction)
+            if self.grid_visible:
+                self.draw_grid()
+        self.selected_shape = None
+
+    def save(self, filename, popup):
+        try:
+            self.export_to_png(f"/sdcard/{filename}.png")
+            popup.dismiss()
+        except Exception as e:
+            print(f"Save failed: {e}")
+
+    def load(self, filename, popup):
+        if filename:
+            try:
+                img = CoreImage(filename)
+                self.canvas.clear()
+                self.canvas.after.clear()
+                with self.canvas:
+                    Color(*self.bg_color)
+                    self.bg_rect = Rectangle(pos=self.pos, size=self.size)
+                    Rectangle(texture=img.texture, pos=self.pos, size=self.size)
+                self.shapes = []
+                self.undo_stack = [[]]
+                self.selected_shape = None
+                if self.grid_visible:
+                    self.draw_grid()
+                popup.dismiss()
+            except Exception as e:
+                print(f"Open failed: {e}")
+
+class DrawingLayout(FloatLayout):
+    pass
+
+class DrawingApp(App):
+    def build(self):
+        return DrawingLayout()
+
+if __name__ == "__main__":
+    DrawingApp().run()
